@@ -124,8 +124,10 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DB_PATH: ${{ env.DB_PATH }}
         run: |
+          DATE_STR=${{ needs.collect.outputs.date_str }}
           MAX=${{ github.event.inputs.max_summaries || '50' }}
           python main.py \
+            --from-json output/esg_papers_${DATE_STR}.json \
             --summarize \
             --max-summaries $MAX \
             --outdir output \

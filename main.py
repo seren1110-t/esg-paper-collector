@@ -134,6 +134,7 @@ def main() -> None:
     parser.add_argument("--max-summaries",  type=int, default=50)
     parser.add_argument("--notify",         action="store_true", help="이메일+Slack 발송")
     parser.add_argument("--no-db",          action="store_true", help="DB 중복체크 건너뜀 (테스트용)")
+    parser.add_argument("--from-json",      default=None,        help="수집 건너뛰고 JSON 파일에서 논문 로드")
     args = parser.parse_args()
 
     start_time = time.time()
@@ -141,21 +142,29 @@ def main() -> None:
     date_str  = datetime.now().strftime("%Y%m%d")
     os.makedirs(args.outdir, exist_ok=True)
 
-    print(f"\nESG 논문 파이프라인 시작 ({date_str}, 최근 {args.days}일)")
-    print(f"소스: {', '.join(sources)}\n")
-
     # ── DB 초기화 ──────────────────────────────────────────────
     if not args.no_db:
         from db import init_db
         init_db()
 
-    # ── 1. 수집 ────────────────────────────────────────────────
-    papers = collect_all(sources, days_back=args.days)
-    collected_count = len(papers)
-    print_summary(papers)
+    # ── 1. 수집 or JSON 로드 ───────────────────────────────────
+    if args.from_json:
+        print(f"\nESG 논문 파이프라인 시작 ({date_str}) — JSON 파일 로드 모드")
+        print(f"입력: {args.from_json}\n")
+        with open(args.from_json, encoding="utf-8") as f:
+            raw = json.load(f)
+        papers = [Paper(**{k: v for k, v in d.items() if k in Paper.__dataclass_fields__}) for d in raw]
+        collected_count = len(papers)
+        print(f"  로드: {collected_count}건")
+    else:
+        print(f"\nESG 논문 파이프라인 시작 ({date_str}, 최근 {args.days}일)")
+        print(f"소스: {', '.join(sources)}\n")
+        papers = collect_all(sources, days_back=args.days)
+        collected_count = len(papers)
+        print_summary(papers)
 
-    # ── 2. DB 중복 제거 ────────────────────────────────────────
-    if not args.no_db and papers:
+    # ── 2. DB 중복 제거 (from-json 모드에서는 collect job에서 이미 처리됨) ──
+    if not args.no_db and not args.from_json and papers:
         from db import filter_new, insert_papers
         papers = filter_new(papers)
         inserted = insert_papers(papers)
