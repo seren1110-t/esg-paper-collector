@@ -11,7 +11,8 @@ from pdf_extractor import extract_text, find_pdf_path
 load_dotenv()
 
 MODEL_NAME = "gemini-3-flash-preview"
-REQUEST_DELAY = 1.0
+REQUEST_DELAY = 13.0   # 5 req/min 한도 → 60/5 = 12s + 1s 여유
+DAILY_QUOTA = 20       # 무료 한도: 20 req/day per model
 
 SYSTEM_PROMPT = """당신은 ESG 컨설팅 전문가입니다.
 학술 논문을 읽고 ESG 컨설턴트가 즉시 활용할 수 있는 구조화된 한국어 요약을 작성합니다.
@@ -92,36 +93,51 @@ def summarize(paper: Paper, client) -> dict:
         body=body,
     )
 
-    try:
-        response = client.models.generate_content(
+    def _call(temperature: float, extra_note: str = "") -> str:
+        resp = client.models.generate_content(
             model=MODEL_NAME,
-            contents=prompt,
+            contents=prompt + extra_note,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
-                temperature=0.2,
+                temperature=temperature,
                 max_output_tokens=2048,
             ),
         )
-        raw_text = response.text
+        return resp.text
+
+    def _extract_retry_delay(err_str: str) -> int:
+        import re
+        m = re.search(r"retryDelay.*?'(\d+)s'", err_str)
+        return int(m.group(1)) + 3 if m else 65
+
+    try:
+        raw_text = _call(0.2)
         try:
             return _parse_response(raw_text)
         except json.JSONDecodeError:
-            # JSON 파싱 실패 시 temperature=0으로 재시도
-            retry = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt + "\n\n반드시 순수 JSON만 출력하세요. 설명 없이.",
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=0.0,
-                    max_output_tokens=2048,
-                ),
-            )
+            time.sleep(2)
+            retry_text = _call(0.0, "\n\n반드시 순수 JSON만 출력하세요. 설명 없이.")
             try:
-                return _parse_response(retry.text)
+                return _parse_response(retry_text)
             except json.JSONDecodeError:
                 return {"raw_response": raw_text, "parse_error": True}
+
     except Exception as e:
-        return {"error": str(e)}
+        err_str = str(e)
+        if "429" in err_str:
+            if "PerDay" in err_str or "Per_Day" in err_str:
+                print(f"    [WARN] 일일 Gemini 할당량 초과 — 이후 요약 건너뜀")
+                return {"error": "daily_quota_exceeded"}
+            # 분당 한도 초과 → 대기 후 1회 재시도
+            wait = _extract_retry_delay(err_str)
+            print(f"    [WARN] 분당 한도 초과 — {wait}초 대기 후 재시도")
+            time.sleep(wait)
+            try:
+                raw_text = _call(0.2)
+                return _parse_response(raw_text)
+            except Exception as e2:
+                return {"error": str(e2)}
+        return {"error": err_str}
 
 
 def summarize_papers(
@@ -150,7 +166,12 @@ def summarize_papers(
             "published_date": paper.published_date,
             "summary": summary,
         })
-        time.sleep(delay)
+        # 일일 할당량 초과 시 즉시 중단
+        if (summary or {}).get("error") == "daily_quota_exceeded":
+            print(f"  [STOP] 일일 할당량 소진 — {len(results)}건에서 중단")
+            break
+        if i < total - 1:
+            time.sleep(delay)
 
     return results
 

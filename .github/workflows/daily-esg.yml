@@ -7,14 +7,16 @@ on:
     inputs:
       days:
         description: '수집 기간 (일)'
-        default: '1'
+        default: '3'
       max_summaries:
-        description: '최대 요약 건수'
-        default: '50'
+        description: '최대 요약 건수 (무료 한도: 20/일)'
+        default: '15'
 
 env:
   PYTHON_VERSION: '3.11'
-  DB_PATH: papers.db
+
+permissions:
+  contents: write   # docs/ 커밋 + push 허용
 
 jobs:
   # ── JOB 1: 논문 수집 + PDF 다운로드 ──────────────────────────
@@ -40,58 +42,49 @@ jobs:
       - name: 의존성 설치
         run: pip install -r requirements.txt
 
-      - name: papers.db 캐시 복원
-        uses: actions/cache@v4
-        with:
-          path: papers.db
-          key: papers-db-${{ github.run_id }}
-          restore-keys: papers-db-
-
       - name: 논문 수집 + PDF 다운로드
         id: collect
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          DAYS=${{ github.event.inputs.days || '1' }}
+          DAYS=${{ github.event.inputs.days || '3' }}
+          DATE_STR=$(python -c "from datetime import datetime; print(datetime.now().strftime('%Y%m%d'))")
+          echo "date_str=$DATE_STR" >> $GITHUB_OUTPUT
+
           python main.py \
             --days $DAYS \
             --sources arxiv,openalex,pubmed \
             --download \
-            --max-pdfs 30 \
-            --output json \
+            --max-pdfs 20 \
+            --output both \
             --outdir output
-          DATE_STR=$(python -c "from datetime import datetime; print(datetime.now().strftime('%Y%m%d'))")
-          echo "date_str=$DATE_STR" >> $GITHUB_OUTPUT
+
+          # 수집 건수 측정
           COUNT=$(python -c "
-          import json, os
-          f = f'output/esg_papers_{os.environ[\"DATE_STR\"]}.json'
-          data = json.load(open(f)) if os.path.exists(f) else []
-          print(len(data))
-          " DATE_STR=$DATE_STR 2>/dev/null || echo 0)
-          echo "collected=$COUNT" >> $GITHUB_OUTPUT
+import json, sys
+try:
+    data = json.load(open('output/esg_papers_${DATE_STR}.json'))
+    print(len(data))
+except Exception as e:
+    print(0)
+" 2>/dev/null || echo 0)
+          echo "collected=${COUNT}" >> $GITHUB_OUTPUT
+          echo "수집 완료: ${COUNT}건"
 
       - name: 수집 결과 업로드
         uses: actions/upload-artifact@v4
         with:
           name: collected-${{ steps.collect.outputs.date_str }}
-          path: |
-            output/esg_papers_*.json
-            output/esg_papers_*.csv
-            output/pdfs_*/
+          path: output/
+          if-no-files-found: warn
           retention-days: 30
-
-      - name: papers.db 캐시 저장
-        uses: actions/cache/save@v4
-        with:
-          path: papers.db
-          key: papers-db-${{ github.run_id }}
 
   # ── JOB 2: 관련성 필터링 + AI 요약 ──────────────────────────
   summarize:
-    name: 🤖 필터링 + 요약 (50건)
+    name: 🤖 필터링 + 요약
     runs-on: ubuntu-latest
     needs: collect
-    timeout-minutes: 40
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -110,53 +103,58 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: collected-${{ needs.collect.outputs.date_str }}
-          path: .    # workspace 루트에 받아야 output/ 구조가 유지됨
+          path: output/
 
-      - name: papers.db 캐시 복원
-        uses: actions/cache@v4
-        with:
-          path: papers.db
-          key: papers-db-${{ github.run_id }}
-          restore-keys: papers-db-
-
-      - name: 입력 파일 확인
+      - name: 수집 파일 확인
         run: |
-          echo "=== 작업 디렉토리 ==="
-          pwd
-          echo "=== 루트 파일 목록 ==="
-          ls -la
-          echo "=== esg_papers JSON 탐색 ==="
-          find . -name "esg_papers_*.json" 2>/dev/null || echo "(JSON 없음)"
+          echo "=== output/ 내용 ==="
+          ls -la output/ 2>/dev/null || echo "(output/ 없음)"
+          JSON=$(ls output/esg_papers_*.json 2>/dev/null | tail -1)
+          if [ -z "$JSON" ]; then
+            echo "[SKIP] JSON 파일 없음 — 요약 건너뜀"
+            exit 0
+          fi
+          COUNT=$(python -c "import json; print(len(json.load(open('$JSON'))))" 2>/dev/null || echo 0)
+          echo "입력 논문: ${COUNT}건 ($JSON)"
 
       - name: 관련성 필터링 + 요약
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DB_PATH: ${{ env.DB_PATH }}
         run: |
           DATE_STR=${{ needs.collect.outputs.date_str }}
-          MAX=${{ github.event.inputs.max_summaries || '50' }}
+          MAX=${{ github.event.inputs.max_summaries || '15' }}
+          JSON_FILE="output/esg_papers_${DATE_STR}.json"
+
+          if [ ! -f "$JSON_FILE" ]; then
+            echo "[SKIP] $JSON_FILE 없음"
+            exit 0
+          fi
+
           python main.py \
-            --from-json output/esg_papers_${DATE_STR}.json \
+            --from-json "$JSON_FILE" \
+            --filter \
             --summarize \
             --max-summaries $MAX \
             --outdir output \
-            --filter
+            --no-db
 
       - name: docs/ 에 브리핑 커밋
         run: |
           DATE_STR=${{ needs.collect.outputs.date_str }}
-          mkdir -p docs/archive
-          if [ -f "output/summary_${DATE_STR}.md" ]; then
-            cp output/summary_${DATE_STR}.md docs/archive/${DATE_STR}.md
-            cp output/summary_${DATE_STR}.md docs/index.md
-          else
-            echo "[SKIP] summary_${DATE_STR}.md 없음 — docs 커밋 생략"
+          MD_FILE="output/summary_${DATE_STR}.md"
+
+          if [ ! -f "$MD_FILE" ]; then
+            echo "[SKIP] 요약 파일 없음 — docs 커밋 생략"
             exit 0
           fi
+
+          mkdir -p docs/archive
+          cp "$MD_FILE" docs/archive/${DATE_STR}.md
+          cp "$MD_FILE" docs/index.md
+
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/
-          git add papers.db
           git diff --cached --quiet || git commit -m "📄 ESG 브리핑 ${DATE_STR} 자동 업데이트"
           git push
 
@@ -167,6 +165,7 @@ jobs:
           path: |
             output/summary_*.json
             output/summary_*.md
+          if-no-files-found: warn
           retention-days: 90
 
   # ── JOB 3: 이메일 + Slack 발송 ───────────────────────────────
@@ -174,7 +173,7 @@ jobs:
     name: 📬 이메일 + Slack 발송
     runs-on: ubuntu-latest
     needs: [collect, summarize]
-    if: always()   # 요약 실패해도 알림 발송
+    if: always()
 
     steps:
       - name: Checkout
@@ -193,8 +192,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: summary-${{ needs.collect.outputs.date_str }}
-          path: .    # workspace 루트에 받아야 output/ 구조가 유지됨
-        continue-on-error: true   # 요약 실패 시에도 에러 알림은 발송
+          path: output/
+        continue-on-error: true
 
       - name: 알림 발송
         env:
