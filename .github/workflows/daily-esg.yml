@@ -121,11 +121,12 @@ jobs:
 
       - name: 입력 파일 확인
         run: |
-          DATE_STR=${{ needs.collect.outputs.date_str }}
-          echo "=== output/ 디렉토리 ==="
-          ls -la output/ || echo "(output/ 없음)"
-          echo "=== JSON 파일 ==="
-          ls output/esg_papers_*.json 2>/dev/null || echo "(JSON 없음)"
+          echo "=== 작업 디렉토리 ==="
+          pwd
+          echo "=== 루트 파일 목록 ==="
+          ls -la
+          echo "=== esg_papers JSON 탐색 ==="
+          find . -name "esg_papers_*.json" 2>/dev/null || echo "(JSON 없음)"
 
       - name: 관련성 필터링 + 요약
         env:

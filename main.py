@@ -149,9 +149,20 @@ def main() -> None:
 
     # ── 1. 수집 or JSON 로드 ───────────────────────────────────
     if args.from_json:
+        import glob as _glob
+        json_path = args.from_json
+        if not os.path.exists(json_path):
+            # 아티팩트 다운로드 위치가 달라질 수 있으므로 전체 탐색
+            candidates = _glob.glob("**/esg_papers_*.json", recursive=True)
+            print(f"  [WARN] {json_path} 없음. 후보 파일: {candidates}")
+            if candidates:
+                json_path = sorted(candidates)[-1]
+                print(f"  [INFO] 대체 파일 사용: {json_path}")
+            else:
+                raise FileNotFoundError(f"esg_papers_*.json 파일을 찾을 수 없습니다. 현재 디렉토리: {os.listdir('.')}")
         print(f"\nESG 논문 파이프라인 시작 ({date_str}) — JSON 파일 로드 모드")
-        print(f"입력: {args.from_json}\n")
-        with open(args.from_json, encoding="utf-8") as f:
+        print(f"입력: {json_path}\n")
+        with open(json_path, encoding="utf-8") as f:
             raw = json.load(f)
         papers = [Paper(**{k: v for k, v in d.items() if k in Paper.__dataclass_fields__}) for d in raw]
         collected_count = len(papers)
