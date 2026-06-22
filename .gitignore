@@ -1,0 +1,19 @@
+# 환경 변수 (절대 커밋 금지)
+.env
+
+# 출력 결과 (Artifact로 관리)
+output/
+
+# 로컬 캐시
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

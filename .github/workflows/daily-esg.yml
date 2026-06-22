@@ -1,0 +1,208 @@
+name: ESG Daily Paper Collector
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 매일 06:00 KST (UTC 21:00)
+  workflow_dispatch:        # 수동 실행 (테스트용)
+    inputs:
+      days:
+        description: '수집 기간 (일)'
+        default: '1'
+      max_summaries:
+        description: '최대 요약 건수'
+        default: '50'
+
+env:
+  PYTHON_VERSION: '3.11'
+  DB_PATH: papers.db
+
+jobs:
+  # ── JOB 1: 논문 수집 + PDF 다운로드 ──────────────────────────
+  collect:
+    name: 📥 수집 + PDF 다운로드
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      collected_count: ${{ steps.collect.outputs.collected }}
+      date_str: ${{ steps.collect.outputs.date_str }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: papers.db 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: papers.db
+          key: papers-db-${{ github.run_id }}
+          restore-keys: papers-db-
+
+      - name: 논문 수집 + PDF 다운로드
+        id: collect
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          DAYS=${{ github.event.inputs.days || '1' }}
+          python main.py \
+            --days $DAYS \
+            --sources arxiv,openalex,pubmed \
+            --download \
+            --max-pdfs 30 \
+            --output json \
+            --outdir output
+          DATE_STR=$(python -c "from datetime import datetime; print(datetime.now().strftime('%Y%m%d'))")
+          echo "date_str=$DATE_STR" >> $GITHUB_OUTPUT
+          COUNT=$(python -c "
+          import json, os
+          f = f'output/esg_papers_{os.environ[\"DATE_STR\"]}.json'
+          data = json.load(open(f)) if os.path.exists(f) else []
+          print(len(data))
+          " DATE_STR=$DATE_STR 2>/dev/null || echo 0)
+          echo "collected=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: 수집 결과 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: collected-${{ steps.collect.outputs.date_str }}
+          path: |
+            output/esg_papers_*.json
+            output/esg_papers_*.csv
+            output/pdfs_*/
+          retention-days: 30
+
+      - name: papers.db 캐시 저장
+        uses: actions/cache/save@v4
+        with:
+          path: papers.db
+          key: papers-db-${{ github.run_id }}
+
+  # ── JOB 2: 관련성 필터링 + AI 요약 ──────────────────────────
+  summarize:
+    name: 🤖 필터링 + 요약 (50건)
+    runs-on: ubuntu-latest
+    needs: collect
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 수집 결과 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: collected-${{ needs.collect.outputs.date_str }}
+          path: output/
+
+      - name: papers.db 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: papers.db
+          key: papers-db-${{ github.run_id }}
+          restore-keys: papers-db-
+
+      - name: 관련성 필터링 + 요약
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DB_PATH: ${{ env.DB_PATH }}
+        run: |
+          MAX=${{ github.event.inputs.max_summaries || '50' }}
+          python main.py \
+            --summarize \
+            --max-summaries $MAX \
+            --outdir output \
+            --filter
+
+      - name: docs/ 에 브리핑 커밋
+        run: |
+          DATE_STR=${{ needs.collect.outputs.date_str }}
+          mkdir -p docs/archive
+          cp output/summary_${DATE_STR}.md docs/archive/${DATE_STR}.md
+          # index.md 최신 브리핑으로 갱신
+          cp output/summary_${DATE_STR}.md docs/index.md
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          git add papers.db
+          git diff --cached --quiet || git commit -m "📄 ESG 브리핑 ${DATE_STR} 자동 업데이트"
+          git push
+
+      - name: 요약 결과 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-${{ needs.collect.outputs.date_str }}
+          path: output/summary_*.json
+          retention-days: 90
+
+  # ── JOB 3: 이메일 + Slack 발송 ───────────────────────────────
+  notify:
+    name: 📬 이메일 + Slack 발송
+    runs-on: ubuntu-latest
+    needs: [collect, summarize]
+    if: always()   # 요약 실패해도 알림 발송
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 요약 결과 다운로드
+        uses: actions/download-artifact@v4
+        with:
+          name: summary-${{ needs.collect.outputs.date_str }}
+          path: output/
+        continue-on-error: true   # 요약 실패 시에도 에러 알림은 발송
+
+      - name: 알림 발송
+        env:
+          SMTP_USER:      ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD:  ${{ secrets.SMTP_PASSWORD }}
+          NOTIFY_EMAIL:   ${{ secrets.NOTIFY_EMAIL }}
+          SLACK_WEBHOOK:  ${{ secrets.SLACK_WEBHOOK }}
+          SUMMARIZE_STATUS: ${{ needs.summarize.result }}
+        run: python -c "
+import os, json, glob
+from notifier import notify_all, send_error_alert
+from datetime import datetime
+
+date_str = datetime.now().strftime('%Y%m%d')
+status   = os.getenv('SUMMARIZE_STATUS', 'unknown')
+
+if status != 'success':
+    send_error_alert(f'요약 Job 실패: {status} ({date_str})')
+else:
+    files = sorted(glob.glob('output/summary_*.json'))
+    results = json.load(open(files[-1], encoding='utf-8')) if files else []
+    stats = {
+        'collected': ${{ needs.collect.outputs.collected_count || 0 }},
+        'filtered': len(results),
+        'summarized': sum(1 for r in results if not (r.get('summary') or {}).get('error')),
+    }
+    notify_all(results, date_str, stats)
+"
