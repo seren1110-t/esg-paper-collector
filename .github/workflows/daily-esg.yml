@@ -110,7 +110,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: collected-${{ needs.collect.outputs.date_str }}
-          path: output/
+          path: .    # workspace 루트에 받아야 output/ 구조가 유지됨
 
       - name: papers.db 캐시 복원
         uses: actions/cache@v4
@@ -118,6 +118,14 @@ jobs:
           path: papers.db
           key: papers-db-${{ github.run_id }}
           restore-keys: papers-db-
+
+      - name: 입력 파일 확인
+        run: |
+          DATE_STR=${{ needs.collect.outputs.date_str }}
+          echo "=== output/ 디렉토리 ==="
+          ls -la output/ || echo "(output/ 없음)"
+          echo "=== JSON 파일 ==="
+          ls output/esg_papers_*.json 2>/dev/null || echo "(JSON 없음)"
 
       - name: 관련성 필터링 + 요약
         env:
@@ -184,7 +192,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: summary-${{ needs.collect.outputs.date_str }}
-          path: output/
+          path: .    # workspace 루트에 받아야 output/ 구조가 유지됨
         continue-on-error: true   # 요약 실패 시에도 에러 알림은 발송
 
       - name: 알림 발송
