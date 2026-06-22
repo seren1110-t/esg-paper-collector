@@ -135,9 +135,13 @@ jobs:
         run: |
           DATE_STR=${{ needs.collect.outputs.date_str }}
           mkdir -p docs/archive
-          cp output/summary_${DATE_STR}.md docs/archive/${DATE_STR}.md
-          # index.md 최신 브리핑으로 갱신
-          cp output/summary_${DATE_STR}.md docs/index.md
+          if [ -f "output/summary_${DATE_STR}.md" ]; then
+            cp output/summary_${DATE_STR}.md docs/archive/${DATE_STR}.md
+            cp output/summary_${DATE_STR}.md docs/index.md
+          else
+            echo "[SKIP] summary_${DATE_STR}.md 없음 — docs 커밋 생략"
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/
@@ -149,7 +153,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: summary-${{ needs.collect.outputs.date_str }}
-          path: output/summary_*.json
+          path: |
+            output/summary_*.json
+            output/summary_*.md
           retention-days: 90
 
   # ── JOB 3: 이메일 + Slack 발송 ───────────────────────────────
