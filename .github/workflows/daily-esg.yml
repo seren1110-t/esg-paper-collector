@@ -181,28 +181,11 @@ jobs:
 
       - name: 알림 발송
         env:
-          SMTP_USER:      ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD:  ${{ secrets.SMTP_PASSWORD }}
-          NOTIFY_EMAIL:   ${{ secrets.NOTIFY_EMAIL }}
-          SLACK_WEBHOOK:  ${{ secrets.SLACK_WEBHOOK }}
+          SMTP_USER:        ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD:    ${{ secrets.SMTP_PASSWORD }}
+          NOTIFY_EMAIL:     ${{ secrets.NOTIFY_EMAIL }}
+          SLACK_WEBHOOK:    ${{ secrets.SLACK_WEBHOOK }}
           SUMMARIZE_STATUS: ${{ needs.summarize.result }}
-        run: python -c "
-import os, json, glob
-from notifier import notify_all, send_error_alert
-from datetime import datetime
-
-date_str = datetime.now().strftime('%Y%m%d')
-status   = os.getenv('SUMMARIZE_STATUS', 'unknown')
-
-if status != 'success':
-    send_error_alert(f'요약 Job 실패: {status} ({date_str})')
-else:
-    files = sorted(glob.glob('output/summary_*.json'))
-    results = json.load(open(files[-1], encoding='utf-8')) if files else []
-    stats = {
-        'collected': ${{ needs.collect.outputs.collected_count || 0 }},
-        'filtered': len(results),
-        'summarized': sum(1 for r in results if not (r.get('summary') or {}).get('error')),
-    }
-    notify_all(results, date_str, stats)
-"
+          COLLECTED_COUNT:  ${{ needs.collect.outputs.collected_count || 0 }}
+          DATE_STR:         ${{ needs.collect.outputs.date_str }}
+        run: python scripts/run_notify.py
